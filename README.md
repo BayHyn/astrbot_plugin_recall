@@ -36,6 +36,12 @@ git clone https://github.com/Zhalslar/astrbot_plugin_recall
 
 请前往插件配置面板进行配置
 
+## 🤝 TODO
+
+- [x] 自动撤回
+- [x] 自动检测长文本、复读消息、违禁词
+- [ ] 自动审核本文、图片
+
 ## 👥 贡献指南
 
 - 🌟 Star 这个项目！（点右上角的星星，感谢支持！）

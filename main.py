@@ -1,12 +1,27 @@
 import asyncio
+
+from aiocqhttp import CQHttp
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import At, Reply
+from astrbot.core.message.components import (
+    At,
+    AtAll,
+    BaseMessageComponent,
+    Face,
+    Forward,
+    Image,
+    Plain,
+    Reply,
+    Video,
+)
+from astrbot import logger
 
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
 
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-from utils import get_ats
 
 @register(
     "astrbot_plugin_recall",
@@ -18,55 +33,89 @@ from utils import get_ats
 class RecallPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.recall_time: int = config.get("recall_time", 60)
+        self.group_whitelist: list[str] = config.get("group_whitelist", [])
+        self.max_plain_len: int = config.get("max_plain_len", 50)
+        self.recall_words: list[str] = config.get("recall_words", [])
+        self.recall_tasks: list[asyncio.Task] = []
+        self.last_msg = None
 
-    @filter.command("撤回")
-    async def delete_msg(self, event: AiocqhttpMessageEvent):
-        """(引用消息)撤回 | 撤回 @某人(默认bot) 数量(默认10)"""
+    def _remove_task(self, task: asyncio.Task):
+        try:
+            self.recall_tasks.remove(task)
+        except ValueError:
+            pass
+
+    async def _recall_msg(self, client: CQHttp, message_id: int = 1):
+        """撤回消息"""
+        await asyncio.sleep(self.recall_time)
+        try:
+            if message_id:
+                await client.delete_msg(message_id=message_id)
+                logger.debug(f"已自动撤回消息: {message_id}")
+        except Exception as e:
+            logger.error(f"撤回消息失败: {e}")
+
+    @filter.on_decorating_result()
+    async def on_recall(self, event: AiocqhttpMessageEvent):
+        """自动撤回长文本、违禁词、色图、复读、人机词"""
+        # 白名单群
+        group_id = event.get_group_id()
+        if self.group_whitelist and group_id not in self.group_whitelist:
+            return
+        chain = event.get_result().chain
+        # 无有效消息段直接退出
+        if not any(
+            isinstance(seg, (Plain, Image, Video, Face, At, AtAll, Forward, Reply))
+            for seg in chain
+        ):
+            return
+
+        obmsg = await event._parse_onebot_json(MessageChain(chain=chain))
         client = event.bot
-        chain = event.get_messages()
-        first_seg = chain[0]
-        if isinstance(first_seg, Reply):
-            try:
-                await client.delete_msg(message_id=int(first_seg.id))
-            except Exception:
-                yield event.plain_result("我无权撤回这条消息")
-            finally:
-                event.stop_event()
-        elif any(isinstance(seg, At) for seg in chain):
-            target_ids = get_ats(event) or [event.get_self_id()]
-            target_ids = {str(uid) for uid in target_ids}
 
-            end_arg = event.message_str.split()[-1]
-            count = int(end_arg) if end_arg.isdigit() else 10
-
-            payloads = {
-                "group_id": int(event.get_group_id()),
-                "message_seq": 0,
-                "count": count,
-                "reverseOrder": True,
-            }
-            result: dict = await client.api.call_action(
-                "get_group_msg_history", **payloads
+        # 发送消息（优先群聊）
+        send_result = None
+        if group_id := event.get_group_id():
+            send_result = await client.send_group_msg(
+                group_id=int(group_id), message=obmsg
+            )
+        elif user_id := event.get_sender_id():
+            send_result = await client.send_private_msg(
+                user_id=int(user_id), message=obmsg
             )
 
-            messages = list(reversed(result.get("messages", [])))
-            delete_count = 0
-            sem = asyncio.Semaphore(10)
+        # 启动撤回任务
+        if (
+            send_result
+            and (message_id := send_result.get("message_id"))
+            and self._is_recall(chain)
+        ):
+            task = asyncio.create_task(self._recall_msg(client, int(message_id)))  # type: ignore
+            task.add_done_callback(self._remove_task)
+            self.recall_tasks.append(task)
 
-            # 撤回消息
-            async def try_delete(message: dict):
-                nonlocal delete_count
-                if str(message["sender"]["user_id"]) not in target_ids:
-                    return
-                async with sem:
-                    try:
-                        await client.delete_msg(message_id=message["message_id"])
-                        delete_count += 1
-                    except Exception:
-                        pass
+        chain.clear()
+        event.stop_event()
 
-            # 并发撤回
-            tasks = [try_delete(msg) for msg in messages]
-            await asyncio.gather(*tasks)
+    def _is_recall(self, chain: list[BaseMessageComponent]) -> bool:
+        """判断消息是否需撤回"""
+        if self.last_msg and chain == self.last_msg:
+            return True
+        self.last_msg = chain
+        for seg in chain:
+            if isinstance(seg, Plain):
+                if len(seg.text) > self.max_plain_len:
+                    return True
+                for word in self.recall_words:
+                    if word in seg.text:
+                        return True
+        return False
 
-            yield event.plain_result(f"已从{count}条消息中撤回{delete_count}条")
+    async def terminate(self):
+        """插件卸载时取消所有撤回任务"""
+        for task in self.recall_tasks:
+            task.cancel()
+        await asyncio.gather(*self.recall_tasks, return_exceptions=True)
+        self.recall_tasks.clear()
+        logger.info("自动撤回插件已卸载")
