@@ -37,6 +37,7 @@ class RecallPlugin(Star):
         self.group_whitelist: list[str] = config.get("group_whitelist", [])
         self.max_plain_len: int = config.get("max_plain_len", 50)
         self.recall_words: list[str] = config.get("recall_words", [])
+        self.error_keywords = config.get("error_keywords", ["请求失败"])
         self.recall_tasks: list[asyncio.Task] = []
         self.last_msg = None
 
@@ -58,7 +59,7 @@ class RecallPlugin(Star):
 
     @filter.on_decorating_result()
     async def on_recall(self, event: AiocqhttpMessageEvent):
-        """自动撤回长文本、违禁词、色图、复读、人机词"""
+        """监听消息并自动撤回"""
         # 白名单群
         group_id = event.get_group_id()
         if self.group_whitelist and group_id not in self.group_whitelist:
@@ -100,16 +101,22 @@ class RecallPlugin(Star):
 
     def _is_recall(self, chain: list[BaseMessageComponent]) -> bool:
         """判断消息是否需撤回"""
+        # 判断复读
         if self.last_msg and chain == self.last_msg:
             return True
         self.last_msg = chain
         for seg in chain:
             if isinstance(seg, Plain):
+                # 判断长文本
                 if len(seg.text) > self.max_plain_len:
                     return True
+                # 判断关键词
                 for word in self.recall_words:
                     if word in seg.text:
                         return True
+            elif isinstance(seg, Image):
+                # TODO: 判断色图
+                pass
         return False
 
     async def terminate(self):
