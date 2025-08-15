@@ -15,7 +15,7 @@ from astrbot.core.message.components import (
     Reply,
     Video,
 )
-from astrbot import logger
+from astrbot.api import logger
 
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
@@ -27,7 +27,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     "astrbot_plugin_recall",
     "Zhalslar",
     "智能撤回插件，可自动判断各场景下消息是否需要撤回",
-    "v1.0.0",
+    "v1.0.1",
     "https://github.com/Zhalslar/astrbot_plugin_recall",
 )
 class RecallPlugin(Star):
@@ -47,6 +47,26 @@ class RecallPlugin(Star):
         except ValueError:
             pass
 
+    def _is_recall(self, chain: list[BaseMessageComponent]) -> bool:
+        """判断消息是否需撤回"""
+        # 判断复读
+        if self.last_msg and chain == self.last_msg:
+            return True
+        self.last_msg = chain
+        for seg in chain:
+            if isinstance(seg, Plain):
+                # 判断长文本
+                if len(seg.text) > self.max_plain_len:
+                    return True
+                # 判断关键词
+                for word in self.recall_words:
+                    if word in seg.text:
+                        return True
+            elif isinstance(seg, Image):
+                # TODO: 判断色图
+               return False
+        return False
+
     async def _recall_msg(self, client: CQHttp, message_id: int = 1):
         """撤回消息"""
         await asyncio.sleep(self.recall_time)
@@ -57,7 +77,7 @@ class RecallPlugin(Star):
         except Exception as e:
             logger.error(f"撤回消息失败: {e}")
 
-    @filter.on_decorating_result()
+    @filter.on_decorating_result(priority=10)
     async def on_recall(self, event: AiocqhttpMessageEvent):
         """监听消息并自动撤回"""
         # 白名单群
@@ -72,10 +92,14 @@ class RecallPlugin(Star):
         ):
             return
 
+        # 判断消息是否需要撤回
+        if not self._is_recall(chain):
+            return
+
         obmsg = await event._parse_onebot_json(MessageChain(chain=chain))
         client = event.bot
 
-        # 发送消息（优先群聊）
+        # 发送消息
         send_result = None
         if group_id := event.get_group_id():
             send_result = await client.send_group_msg(
@@ -96,28 +120,9 @@ class RecallPlugin(Star):
             task.add_done_callback(self._remove_task)
             self.recall_tasks.append(task)
 
+        # 清空原消息链
         chain.clear()
         event.stop_event()
-
-    def _is_recall(self, chain: list[BaseMessageComponent]) -> bool:
-        """判断消息是否需撤回"""
-        # 判断复读
-        if self.last_msg and chain == self.last_msg:
-            return True
-        self.last_msg = chain
-        for seg in chain:
-            if isinstance(seg, Plain):
-                # 判断长文本
-                if len(seg.text) > self.max_plain_len:
-                    return True
-                # 判断关键词
-                for word in self.recall_words:
-                    if word in seg.text:
-                        return True
-            elif isinstance(seg, Image):
-                # TODO: 判断色图
-                pass
-        return False
 
     async def terminate(self):
         """插件卸载时取消所有撤回任务"""
