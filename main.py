@@ -33,11 +33,10 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 class RecallPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        self.recall_time: int = config.get("recall_time", 60)
-        self.group_whitelist: list[str] = config.get("group_whitelist", [])
-        self.max_plain_len: int = config.get("max_plain_len", 50)
-        self.recall_words: list[str] = config.get("recall_words", [])
-        self.error_keywords = config.get("error_keywords", ["请求失败"])
+        self.conf = config
+        self.forward_threshold: int = self.context.get_config()["platform_settings"][
+            "forward_threshold"
+        ]
         self.recall_tasks: list[asyncio.Task] = []
         self.last_msg = None
 
@@ -56,10 +55,11 @@ class RecallPlugin(Star):
         for seg in chain:
             if isinstance(seg, Plain):
                 # 判断长文本
-                if len(seg.text) > self.max_plain_len:
+                if self.conf["max_plain_len"] < len(seg.text) < self.forward_threshold:
+                    logger.debug(f"文本长度：{len(seg.text)}， 需要撤回")
                     return True
                 # 判断关键词
-                for word in self.recall_words:
+                for word in self.conf["recall_words"]:
                     if word in seg.text:
                         return True
             elif isinstance(seg, Image):
@@ -69,7 +69,7 @@ class RecallPlugin(Star):
 
     async def _recall_msg(self, client: CQHttp, message_id: int = 1):
         """撤回消息"""
-        await asyncio.sleep(self.recall_time)
+        await asyncio.sleep(self.conf["recall_time"])
         try:
             if message_id:
                 await client.delete_msg(message_id=message_id)
@@ -82,7 +82,10 @@ class RecallPlugin(Star):
         """监听消息并自动撤回"""
         # 白名单群
         group_id = event.get_group_id()
-        if self.group_whitelist and group_id not in self.group_whitelist:
+        if (
+            self.conf["group_whitelist"]
+            and group_id not in self.conf["group_whitelist"]
+        ):
             return
         chain = event.get_result().chain
         # 无有效消息段直接退出
@@ -99,7 +102,6 @@ class RecallPlugin(Star):
         obmsg = await event._parse_onebot_json(MessageChain(chain=chain))
         client = event.bot
 
-        # 发送消息
         send_result = None
         if group_id := event.get_group_id():
             send_result = await client.send_group_msg(
